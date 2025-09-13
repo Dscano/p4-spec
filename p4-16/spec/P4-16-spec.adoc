@@ -1225,11 +1225,18 @@ number of backslash characters (ASCII code 92). P4 does not make any
 validity checks on strings (i.e., it does not check that strings
 represent legal UTF-8 encodings).
 
-Since P4 does not provide any operations on strings,
-string literals are generally passed unchanged through the P4 compiler to
-other third-party tools or compiler-backends, including the
-terminating quotes. These tools can define their own handling of
-escape sequences (e.g., how to specify Unicode characters, or handle
+Since P4 does not allow strings to exist at runtime, string literals
+are generally passed unchanged through the P4 compiler to
+other third-party tools or compiler-backends. The compiler can, however,
+perform compile-time concatenation (constant-folding) of concatenation
+expressions into single literal. When such concatenation is performed,
+the binary representation of the string literals (excluding the quotes)
+is concatenated in the order they appears in the source code. There are
+no escape sequences that would be treated specially when strings are
+concatenated.
+
+The backends and other tools can define their own handling of escape
+sequences (e.g., how to specify Unicode characters, or handle
 unprintable ASCII characters).
 
 Here are 3 examples of string literals:
@@ -1241,6 +1248,17 @@ Here are 3 examples of string literals:
 "string with embedded
 line terminator"
 ----
+
+Here is an example of concatenation expression and an equivalent string
+literal:
+
+[source,p4]
+----
+"one string \" with a quote inside;" ++ (" " ++ "another string")
+// can be constant folded to
+"one string \" with a quote inside; another string"
+----
+
 
 [#sec-trailing-commas]
 ==== Optional trailing commas
@@ -1867,15 +1885,20 @@ Operations on values of type `match_kind` are described in
 ==== The Boolean type
 
 The Boolean type `bool` contains just two values, `false` and `true`.
-Boolean values are not integers or bit-strings.
+Boolean values are not integers or bit-strings. Operations that can
+be performed on booleans are described in Section <<sec-bool-exprs>>.
 
 [#sec-string-type]
 ==== Strings
 
-The type `string` represents strings.  There are no operations on
-string values; one cannot declare variables with a `string` type.
-Parameters with type `string` can be only directionless (see
-<<sec-calling-convention>>).
+The type `string` represents strings. The values of type `string` are
+either string literals, or concatenations of multiple `string`-typed
+expression. Operations that can be performed on strings are described in
+Section <<sec-string-ops>>.
+
+One cannot declare variables with a `string` type. Parameters with
+type `string` can be only directionless (see Section
+<<#sec-calling-convention>>).
 P4 does not support string manipulation
 in the dataplane; the `string` type is only allowed for describing
 compile-time known values (i.e., string literals, as discussed in
@@ -2560,6 +2583,13 @@ arbitrary-precision integer, without a width specified.
 
 | `list types`         | error     | error   |  error   | allowed | error
 
+| `extern types`       | error     | error   |  error   | error   | error
+
+| `parser types`       | error     | error   |  error   | error   | error
+
+| `control types`      | error     | error   |  error   | error   | error
+
+| `package types`      | error     | error   |  error   | error   | error
 |===
 
 [1] An `enum` type used as a field in a `header` must specify a
@@ -2607,19 +2637,27 @@ The table below lists all types that may appear as base types in a
 
 | `bool`              | allowed            | allowed
 
-| enumeration types   | allowed            | error
+| `enumeration types`   | allowed            | error
 
-| header types        | allowed            | error
+| `header types`        | allowed            | error
 
-| header stacks       | allowed            | error
+| `header stacks`       | allowed            | error
 
-| header unions       | allowed            | error
+| `header unions`       | allowed            | error
 
-| struct types        | allowed            | error
+| `struct types`        | allowed            | error
 
-| tuple types         | allowed            | error
+| `tuple types`         | allowed            | error
 
-| list types          | allowed            | error
+| `list types`          | allowed            | error
+
+| `extern types`        | allowed            | error
+
+| `parser types`        | allowed            | error
+
+| `control types`       | allowed            | error
+
+| `package types`       | allowed            | error
 
 | a `typedef` name    | allowed            | allowed [3]
 
@@ -2724,11 +2762,7 @@ to a target.
 ----
 include::grammar.adoc[tag=methodPrototypes]
 
-methodPrototype
-    : optAnnotations functionPrototype ';'
-    | optAnnotations TYPE_IDENTIFIER '(' parameterList ')' ';' //constructor
-    | optAnnotations ABSTRACT functionPrototype ";"
-    ;
+include::grammar.adoc[tag=methodPrototype]
 
 include::grammar.adoc[tag=typeOrVoid]
 
@@ -2765,7 +2799,7 @@ either by the number of arguments or by the names of the arguments,
 when calls are specifying argument names.  Argument type information
 is not used in disambiguating calls.
 
-Notice that overloading of parsers, controls, or packages is not allowed:
+Notice that overloading of abstract methods, parsers, controls, or packages is not allowed:
 
 [source,p4]
 ----
@@ -3486,6 +3520,25 @@ which cannot both be arbitrary-precision integers unless the condition
 itself can be evaluated at compilation time. This restriction is
 designed to ensure that the width of the result of the conditional
 expression can be inferred statically at compile time.
+
+[#sec-string-ops]
+=== Operations on strings
+
+The only operation allowed on strings is concatenation, denoted by
+`++`. For string concatenation, both operands must be strings and
+the result is also a string. String concatenation can only be
+performed at compile time.
+
+[source,p4]
+----
+extern void log(string message);
+
+void foo(int<8> v) {
+  // ...
+  log("my log message " ++
+      "continuation of the log message");
+}
+----
 
 [#sec-bit-ops]
 === Operations on fixed-width bit types (unsigned integers)
@@ -4880,8 +4933,8 @@ f(y = ya, x = xa);  // match arguments by name in any order
 
 The calling convention is copy-in/copy-out (<<sec-calling-convention>>).  For generic functions the type arguments
 can be explicitly specified in the function call. The compiler only
-inserts implicit casts for direction `in` arguments to methods or
-functions as described in <<sec-casts>>.  The types for all
+inserts implicit casts for direction `in` or directionless arguments to methods,
+functions, or constructors as described in <<sec-casts>>. The types for all
 other arguments must match the parameter types exactly.
 
 The result returned by a function call is discarded when the function
@@ -4973,21 +5026,19 @@ bool b2 = x == y;  // no cast needed
 [#sec-type-variable-operations]
 === Operations on types that are type variables
 
-Because functions, methods, control, and parsers can be generic,
+Because functions and methods can be generic,
 they offer the possibility of declaring values with types that
 are type variables:
 
 [source,p4]
 ----
-control C<T>() {
-    apply {
-        T x;  // the type of x is T, a type variable
-    }
+void f<T>() {
+   T x; // the type of x is T, a type variable
 }
 ----
 
-The type of such objects is not known until the control is
-instantiated with specific type arguments.
+The type of such objects is not known until the function is
+specialized with specific type arguments.
 
 Currently the only operations that are available for such values are
 assignment (explicit through `=`, or implicit, through argument passing).
@@ -5415,10 +5466,15 @@ include::grammar.adoc[tag=objDeclarations]
 include::grammar.adoc[tag=objDeclaration]
 ----
 
+Abstract method implementations must use the same number of parameters, and
+the same parameter directions as those declared in the extern object declaration.
+Note that overloading of abstract methods is not allowed, thus an
+implementation could be matched to a declaration only with the method name.
+
 The abstract methods can only use the supplied arguments or refer to
-values that are in the top-level scope.  When calling another method
-of the same instance the `this` keyword is used to indicate the
-current object instance:
+values that are in the same initializer block or the top-level scope. 
+When calling another method of the same instance the `this` keyword is
+used to indicate the current object instance:
 
 [source,p4]
 ----
@@ -5463,12 +5519,12 @@ Statements can appear in several places:
 
 * Within `parser` states
 * Within a `control` block
-* Within an `action`
+* Within an `action` or function
 
 There are restrictions for the kinds of statements that can appear in
-each of these places. For example, ``return``s are not supported in
-parsers, and `switch` statements are only supported in control
-blocks. We present here the most general case, for control blocks.
+each of these places. For example, neither ``return``s nor `switch`
+statements are supported in parsers. We present here the most general
+case, for control blocks.
 
 [source,bison]
 ----
@@ -5484,6 +5540,8 @@ statement
     ;
 
 include::grammar.adoc[tag=assignmentOrMethodCallStatement]
+
+include::grammar.adoc[tag=assignmentOrMethodCallStatementWithoutSemicolon]
 ----
 
 In addition, parsers support a `transition` statement (<<sec-transition>>).
@@ -5497,6 +5555,15 @@ to a value, and finally copies the value into the l-value. Derived
 types (e.g. ``struct``s) are copied recursively, and all components
 of ``header``s are copied, including "validity" bits. Assignment is
 not defined for `extern` values.
+
+An assignment may also be written with a binary arithmetic or bit manipulation
+operator immediately before the `=` sign.  This performs the binary operator on
+the old value of the left sub-expression and the right sub-expression and assigns
+the result to the l-value.  Thus an assignment like `A += B` is equivalent
+to `A = A + B`, except that `A` is only evaluated once.  This means that
+any side-effects within this operand (eg, a function call inside an array index
+or slice expression) only occur once.  This is not valid
+for comparison operators, logical operators, concat, range, or mask operators.
 
 [#sec-empty-stmt]
 === Empty statement
@@ -5621,7 +5688,8 @@ innermost `if` statement that does not have an `else` statement.
 [#sec-switch-stmt]
 === Switch statement
 
-The `switch` statement can only be used within `control` blocks.
+The `switch` statement can only be used within `control` blocks, `action`
+bodies, or function bodies.
 
 [source,bison]
 ----
@@ -5646,9 +5714,10 @@ separately in the following two subsections.
 
 ==== Switch statement with `action_run` expression
 
-For this variant of `switch` statement, the expression must be of the
-form `t.apply().action_run`, where `t` is the name of a table (see
-<<sec-invoke-mau>>).  All switch labels must be names of
+This type of `switch` statement can only be used within control `apply`
+blocks.  For this variant of `switch` statement, the expression must be
+of the form `t.apply().action_run`, where `t` is the name of a table
+(see <<sec-invoke-mau>>).  All switch labels must be names of
 actions of the table `t`, or `default`.
 
 [source,p4]
@@ -5730,21 +5799,31 @@ for possible techniques that one might
 use to implement generalized switch statements.footnote:GeneralizedSwitchStatements[<https://github.com/p4lang/p4-spec/blob/master/p4-16/spec/docs/implementing-generalized-switch-statements.md>]
 
 [#sec-loop-stmt]
-=== Loop statement
+=== For statement
 
-A `loop` statement executes a statement zero or more times, based on a
+A `for` statement executes a statement zero or more times, based on a
 condition or a range or collection.
 
 [source,bison]
 ----
-include::grammar.adoc[tag=loopStatement]
+include::grammar.adoc[tag=forStatement]
 
-include::grammar.adoc[tag=forInitStatement]
+include::grammar.adoc[tag=forInitStatements]
 
-include::grammar.adoc[tag=forUpdateStatement]
+include::grammar.adoc[tag=forInitStatementsNonEmpty]
+
+include::grammar.adoc[tag=declOrAssignmentOrMethodCallStatement]
+
+include::grammar.adoc[tag=forUpdateStatements]
+
+include::grammar.adoc[tag=forUpdateStatementsNonEmpty]
+
+include::grammar.adoc[tag=forCollectionExpr]
+
+include::grammar.adoc[tag=assignmentOrMethodCallStatementWithoutSemicolon]
 ----
 
-The basic 3-clause `for` statement is similar to a C for statement.  The init statements
+The basic 3-clause `for` statement is similar to a C `for` statement.  The init statements
 will be executed prior to executing the loop.  The condition will be evaluated before
 each iteration, to determine if the loop should exit.  If the condition is false, the loop
 will exit without executing any statements from the loop body or update.
@@ -5763,9 +5842,8 @@ A `continue;` statement may be executed in a loop body to skip the rest of the c
 loop body, executing the update statements and then evaluating the condition to
 either execute the loop body again, or terminate the loop.
 
-The scope of any declaration in a for statement is limited to the for statement and its body.
+The scope of any declaration in a `for` statement is limited to the `for` statement and its body.
 
->>>>>>> upstream/main:p4-16/spec/P4-16-spec.mdk
 [#sec-packet-parsing]
 == Packet parsing
 
@@ -6565,8 +6643,8 @@ include::grammar.adoc[tag=valueSetDeclaration]
 ----
 
 Parser Value Sets support a `size` argument to provide hints to the compiler to
-reserve hardware resources to implement the value set. For example, this parser
-value set:
+reserve hardware resources to implement the value set. Thus, the `size` argument
+must be a compile-time known value. For example, this parser value set:
 
 [source,p4]
 ----
@@ -7087,6 +7165,12 @@ table---e.g. when using the P4 Runtime API, tables with at least one
 order, stopping at the first matching entry. Architectures should
 define the significance of entry order (if any) for other kinds of
 tables.
+
+Because control-plane APIs cannot insert or remove entries of a table
+that is declared with `const entries`, the relative priorities of such a
+table's entries are determined solely by the program order of the entries.
+Therefore assigning numeric priorities to entries of a table that has
+`const entries` is not allowed.
 
 Depending on the `match_kind` of the keys, key set expressions may define
 one or multiple entries. The compiler will synthesize the correct number of
@@ -8102,6 +8186,8 @@ The following are local compile-time known values:
 - Structure-valued expressions, where all fields are local compile-time known values.
 - Expressions evaluating to a list type, where all elements are local compile-time known values.
 - Legal casts applied to local compile-time known values.
+- Indexing a local compile-time known stack or tuple value with a local compile-time known index.
+- Accessing a field of a local compile-time known struct, header, or header union value.
 - The following expressions (`+`, `-`, `|+|`, `|-|`, `*`, `/ `, `%`, `!`, `&`, `|`, `^`, `&&`, `||`, `<< `, `>>`, `~`, `/`, `>`, `<`, `==`, `!=`, `<=`, `>=`, `++`, `[:]`, `?:`) when their operands are all local compile-time known values.
 - Expressions of the form `e.minSizeInBits()`, `e.minSizeInBytes()`, `e.maxSizeInBits()` and `e.maxSizeInBytes()` where the type of `e` is not generic.
 
@@ -8114,6 +8200,8 @@ The following are compile-time known values:
 - Structure-valued expressions, where all fields are compile-time known values.
 - Expressions evaluating to a list type, where all elements are compile-time known values.
 - Legal casts applied to compile-time known values.
+- Indexing a compile-time known stack or tuple value with a compile-time known index.
+- Accessing a field of a compile-time known struct, header, or header union value.
 - The following expressions (`+`, `-`, `|+|`, `|-|`, `*`, `/ `, `%`, `cast`, `!`, `&`, `|`, `^`, `&&`, `||`, `<< `, `>> `, `~`, `/`, `>`, `<`, `==`, `!=`, `<=`, `>=`, `++`, `[:]`, `?:`) when their operands are all compile-time known values.
 - Expressions of the form `e.minSizeInBits()`, `e.minSizeInBytes()`, `e.maxSizeInBits()` and `e.maxSizeInBytes()` where the the type of `e` is generic.
 
@@ -8892,9 +8980,10 @@ table t {
 
 The `@name` annotation directs the compiler to use a different
 local name when generating the external APIs used to manipulate a
-language element from the control plane. This annotation takes a string literal
-body.  In the
-following example, the fully-qualified name of the table is `c_inst.t1`.
+language element from the control plane. This annotation takes a local
+compile-time known value of type `string` (typically a string literal).
+In the following example, the fully-qualified name of the table is
+`c_inst.t1`.
 
 [source,p4]
 ----
@@ -8942,6 +9031,35 @@ to two controllable entities, which is illegal.
 
 The `@atomic` annotation, described in <<sec-concurrency>>
 can be used to enforce the atomic execution of a code block.
+
+[#sec-branch-annotations]
+==== Branch prediction annotations
+
+The `@likely` and `@unlikely` annotation can be used on blocks that
+are used in `if`-`else` or `switch` statements to hint when a branch
+is likely or unlikely to be taken.
+
+[source.p4]
+----
+if (error_failure) @unlikely {
+    /* code that is unlikely to execute as the condition is probably false */
+}
+
+switch(value) {
+    1: @likely {
+        /* code for the most common case */
+       }
+    2: { /* ... */ }
+    default: @unlikely {
+        /* code for rare case */
+    }
+}
+----
+
+These annotations have no effect on the semantics of the program; they are
+just hints to help an optimizer.  A warning may be issued if a `@likely`
+block is found to never execute or an `@unlikely` block will always execute,
+but is not required.
 
 [#sec-value-set-annotations]
 ==== Value set annotations
@@ -8997,12 +9115,14 @@ absence), allowing architecture-independent analysis of P4 programs.
 
 The `deprecated` annotation has a required string argument that is a
 message that will be printed by a compiler when a program is using the
-deprecated construct.  This is mostly useful for annotating library
-constructs, such as externs.
+deprecated construct. This is mostly useful for annotating library
+constructs, such as externs. The parameter must be a local
+compile-time known value of type `string`.
 
 [source,p4]
 ----
-@deprecated("Please use the 'check' function instead")
+#define DEPR_V1_2_2 "Deprecated in v1.2.2"
+@deprecated("Please use the 'check' function instead." ++ DEPR_V1_2_2)
 extern Checker {
    /* body omitted */
 }
@@ -9014,7 +9134,8 @@ extern Checker {
 The `noWarn` annotation has a required string argument that indicates
 a compiler warning that will be inhibited.  For example
 `@noWarn("unused")` on a declaration will prevent a compiler warning
-if that declaration is not used.
+if that declaration is not used. The parameter must be a local
+compile-time known value of type `string`.
 
 === Target-specific annotations
 
@@ -9036,6 +9157,13 @@ The P4 compiler should provide:
 == Revision History
 
 ===  Summary of changes made in unreleased version
+
+* Clarified that numeric priorities cannot be assigned to entries of a table that has `const entries` (<<sec-entries>>).
+* Clarified that `switch` statements are allowed in action and function bodies, and that `switch` statements with `action_run` expressions are only allowed in control `apply` blocks (<<sec-stmts>> and <<sec-switch-stmt>>).
+* Added standard branch prediction annotations (<<sec-branch-annotations>>)
+* Added support for compile-time string concatenation using `++` operator (<<sec-string-type>> and <<sec-string-ops>>).
+* Added compound assignment statements (<<sec-assignment>>)
+* Update the specification grammar for `for` loops to match the grammar used in the `p4c` implementation (<<sec-loop-stmt>>).
 
 === Summary of changes made in version 1.2.5, released October 11, 2024
 
@@ -9490,13 +9618,13 @@ program, but constants may.
 
 |             | top level | package | parser  | control | extern | function
 
-| package     | yes       |  no     | no      | no      |  no    |  no
+| package     | yes       |  yes    | no      | no      |  no    |  no
 
-| parser      |  no       |  no     | yes     | no      |  no    |  no
+| parser      |  no       |  yes    | yes     | no      |  no    |  no
 
-| control     |  no       |  no     | no      | yes     |  no    |  no
+| control     |  no       |  yes    | no      | yes     |  no    |  no
 
-| extern      | yes       |  no     | yes     | yes     |  no    |  no
+| extern      | yes       |  yes    | yes     | yes     |  no    |  no
 
 | function    | yes       |  no     | no      | no      |  no    |  no
 
@@ -9525,7 +9653,7 @@ extern functions), actions, and functions.
 
 | control     |  no       |  no     | no      | no      |  no
 
-| extern      | yes       | yes     | yes     | no      |  no
+| extern      |  yes      | yes     | yes     | no      |  no
 
 | table       |  no       |  no     | no      | no      |  no
 
@@ -9547,37 +9675,43 @@ The next table lists restrictions on what kinds of calls can be made
 from which places in a P4 program.  Calling a parser, control, or
 table means invoking its `apply()` method. Calling a value-set means using it
 in a select expression. The row for `extern` describes where extern method
-calls can be made from.
+or extern function calls can be made from. The row for `function` describes
+where calls to functions, but not extern functions, can be made from.
 
 One way that an extern can be called from the top level of a parser or
 control is in an initializer expression for a declared variable,
-e.g. `bit<32> x = rand.get();`.
+e.g. `bit<32> x = rand.get();`. Here, the top level of a parser or control
+means either within a parser declaration, but outside of any of its parser
+state declarations, or within a control declaration, but outside its
+`apply { ... }` block.
 
-[.center,cols="3,^2,^2,^2,^2,^2,^2",width=90%]
+[.center,cols="3,^2,^2,^2,^2,^2,^2,^2",width=90%]
 |===
-| This type 6+^| can be called at run time from this place in a P4 program
+| This type 7+^| can be called at run time from this place in a P4 program
 
-|             .>| parser state .>| control apply block .>| parser or top level .>| action .>| extern .>| function
+|             .>| top level .>| parser state .>| control apply block .>| top level within a parser or control .>| action .>| extern .>| function
 
-| package     | N/A       | N/A     | N/A       | N/A     | N/A    | N/A
+| package     | N/A 	      | N/A       | N/A     | N/A       | N/A     | N/A    | N/A
 
-| parser      | yes       |  no     | no        | no      | no     | no
+| parser      | no            | yes       |  no     | no        | no      | no     | no
 
-| control     |  no       | yes     | no        | no      | no     | no
+| control     | no            |  no       | yes     | no        | no      | no     | no
 
-| extern      | yes       | yes     | yes       | yes     | no     | no
+| extern      | no            | yes       | yes     | yes       | yes     | no     | yes
 
-| table       |  no       | yes     | no        | no      | no     | no
+| table       | no            |  no       | yes     | no        | no      | no     | no
 
-| value-set   | yes       | no      | no        | no      | no     | no
+| value-set   | no            | yes       | no      | no        | no      | no     | no
 
-| action      |  no       | yes     | no        | yes     | no     | no
+| action      | no            |  no       | yes     | no        | yes     | no     | no
 
-| function    | yes       | yes     | no        | yes     | no     | yes
+| function    | no [1]        | yes       | yes     | yes        | yes     | no     | yes
 
-| value types | N/A       | N/A     | N/A       | N/A     | N/A    | N/A
+| value types | N/A           | N/A       | N/A     | N/A       | N/A     | N/A    | N/A
 
 |===
+
+[1] Calls to function `static_assert` are exceptionally allowed at the top level.
 
 There may not be any recursion in calls, neither by a thing calling
 itself directly, nor mutual recursion.
